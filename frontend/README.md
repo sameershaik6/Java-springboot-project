@@ -54,51 +54,60 @@ nohup env \
 ```
 The backend application will now run on port **8084** (default configuration).
 ps -ef | grep java #check process 
+    ----OR----- skip 7th step if do with systemd
+ # Backend Deployment – Spring Boot
 
- ##run through systemd process-
- 2. Create the application log directory
+Backend runs on **port 8084** and is managed using **systemd**.
 
-Your application.properties has:
+## 1. Check Java Process
 
-logging.file.name=${LOG_FILE_PATH:/var/log/app/datastore.log}
+```bash
+ps -ef | grep java
+```
 
-So create the default directory:
+## 2. Create Log Directory
 
+```bash
 sudo mkdir -p /var/log/app
+```
 
-Because your systemd service is currently going to run as root, it can write there.
+Application log:
 
-3. Check your Spring Boot application.properties
+```text
+/var/log/app/datastore.log
+```
 
-Keep:
+## 3. Configure `application.properties`
 
+```properties
 logging.file.name=${LOG_FILE_PATH:/var/log/app/datastore.log}
-
-And database configuration should use your environment variables:
 
 spring.datasource.url=jdbc:mysql://${MYSQL_HOST}:${MYSQL_PORT}/datastore
 spring.datasource.username=${MYSQL_USERNAME}
 spring.datasource.password=${MYSQL_PASSWORD}
 
 server.port=8084
-4. Create the systemd service
+```
+
+## 4. Create systemd Service
+
+```bash
 sudo vi /etc/systemd/system/datastore.service
+```
 
-Put:
-
+```ini
 [Unit]
 Description=Student Management Spring Boot Backend
 After=network.target
 
 [Service]
 User=root
-
 WorkingDirectory=/root/Java-springboot-project/backend
 
 Environment="MYSQL_HOST=database-1.cxeakuo04ry1.us-east-1.rds.amazonaws.com"
 Environment="MYSQL_PORT=3306"
 Environment="MYSQL_USERNAME=admin"
-Environment="MYSQL_PASSWORD=YOUR_PASSWORD_HERE"
+Environment="MYSQL_PASSWORD=YOUR_PASSWORD"
 
 ExecStart=/usr/bin/java -jar /root/Java-springboot-project/backend/target/datastore-0.0.7.jar --server.port=8084
 
@@ -107,81 +116,70 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+```
 
-Notice: no nohup, no &, no > nohup.out.
+> Replace `YOUR_PASSWORD` with the actual database password. Do not commit passwords to Git.
 
-systemd handles the process.
+## 5. Reload and Enable
 
-5. Reload systemd
+```bash
 sudo systemctl daemon-reload
-6. Enable it for EC2 reboot
 sudo systemctl enable datastore
+```
 
-This means:
+## 6. Start Application
 
-EC2 reboot
-    ↓
-systemd
-    ↓
-datastore.service
-    ↓
-Spring Boot starts automatically
-7. Start the application
+```bash
 sudo systemctl start datastore
-8. Check whether Spring Boot started
+```
+
+## 7. Check Status
+
+```bash
 sudo systemctl status datastore
+```
 
-You want:
+Expected:
 
+```text
 Active: active (running)
-9. Check the Spring Boot application log
+```
 
-Because you configured:
+## 8. Check Logs
 
-logging.file.name=${LOG_FILE_PATH:/var/log/app/datastore.log}
+Spring Boot log:
 
-and did not provide LOG_FILE_PATH, Spring Boot uses the default:
-
-/var/log/app/datastore.log
-
-Check:
-
+```bash
 sudo tail -f /var/log/app/datastore.log
+```
 
-You should see Spring Boot startup messages.
+systemd log:
 
-10. Check systemd logs too
-
-Run:
-
+```bash
 sudo journalctl -u datastore -f
+```
 
-This is different from your Spring Boot log file.
+## 9. Test Backend
 
-Think:
-
-Spring Boot log
-    ↓
-/var/log/app/datastore.log
-
-while:
-
-systemd service output
-    ↓
-journalctl -u datastore
-11. Test Spring Boot locally
-
-On the backend EC2:
-
+```bash
 curl http://localhost:8084/student/all
+```
 
-If it returns something like:
+Expected response if no students exist:
 
+```json
 []
+```
 
-your application is responding.
+## Useful Commands
 
----
+```bash
+sudo systemctl restart datastore
+sudo systemctl stop datastore
+sudo systemctl start datastore
+sudo systemctl status datastore
+```
+
 
 ## Frontend Setup
 
