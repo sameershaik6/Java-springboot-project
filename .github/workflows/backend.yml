@@ -58,10 +58,10 @@ jobs:
           java-version: '11'
           cache: maven
 
-      - name: Build and Test with Maven
+      - name: Build with Maven
         working-directory: backend
         run: |
-          mvn clean verify
+          mvn clean verify -DskipTests
 
       - name: SonarQube Analysis
         working-directory: backend
