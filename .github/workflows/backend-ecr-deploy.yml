@@ -1,129 +1,27 @@
-name: Backend Docker ECR Deploy
+name: Test AWS OIDC
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'backend/**'
-      - '.github/workflows/backend-ecr-deploy.yml'
-
   workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: java-springboot-backend
-  CONTAINER_NAME: springboot-backend
-  IMAGE_TAG: ${{ github.sha }}
-
 jobs:
 
-  build-push-deploy:
+  test-oidc:
 
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Checkout source code
-        uses: actions/checkout@v6
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: us-east-1
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build Docker image
+      - name: Test AWS identity
         run: |
-          docker build \
-            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
-            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
-            ./backend
+          aws sts get-caller-identity
 
-      - name: Push Docker image to ECR
-        run: |
-          docker push \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-
-          docker push \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-
-      - name: Deploy to Backend EC2
-        env:
-          EC2_HOST: ${{ secrets.BACKEND_EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-          EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
-
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-
-          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
-          MYSQL_USERNAME: ${{ secrets.MYSQL_USERNAME }}
-          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
-
-        run: |
-
-          mkdir -p ~/.ssh
-
-          echo "$EC2_KEY" > ~/.ssh/backend-key.pem
-
-          chmod 600 ~/.ssh/backend-key.pem
-
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-
-          ssh -i ~/.ssh/backend-key.pem \
-            "$EC2_USER@$EC2_HOST" \
-            "ECR_REGISTRY='$ECR_REGISTRY' \
-             AWS_REGION='${{ env.AWS_REGION }}' \
-             ECR_REPOSITORY='${{ env.ECR_REPOSITORY }}' \
-             IMAGE_TAG='${{ env.IMAGE_TAG }}' \
-             MYSQL_HOST='$MYSQL_HOST' \
-             MYSQL_USERNAME='$MYSQL_USERNAME' \
-             MYSQL_PASSWORD='$MYSQL_PASSWORD' \
-             bash -s" << 'EOF'
-
-            set -e
-
-            echo "Logging into ECR..."
-
-            aws ecr get-login-password \
-              --region "$AWS_REGION" | \
-              docker login \
-              --username AWS \
-              --password-stdin "$ECR_REGISTRY"
-
-            echo "Pulling new backend image..."
-
-            docker pull \
-              "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-            echo "Stopping old container..."
-
-            docker stop springboot-backend || true
-
-            docker rm springboot-backend || true
-
-            echo "Starting new backend container..."
-
-            docker run -d \
-              --name springboot-backend \
-              --restart unless-stopped \
-              -p 8084:8084 \
-              -e MYSQL_HOST="$MYSQL_HOST" \
-              -e MYSQL_PORT=3306 \
-              -e MYSQL_USERNAME="$MYSQL_USERNAME" \
-              -e MYSQL_PASSWORD="$MYSQL_PASSWORD" \
-              "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-            echo "Backend deployment completed."
-
-            docker ps
-
-          EOF
