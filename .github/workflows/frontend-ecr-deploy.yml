@@ -1,0 +1,175 @@
+name: Frontend Docker ECR Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-ecr-deploy.yml'
+
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: java-springboot-frontend
+  CONTAINER_NAME: streamlit-frontend
+
+jobs:
+
+  build-push-deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ------------------------------------------------
+      # 1. Checkout code
+      # ------------------------------------------------
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+
+      # ------------------------------------------------
+      # 2. Configure AWS credentials
+      # ------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+
+      # ------------------------------------------------
+      # 3. Test AWS connection
+      # ------------------------------------------------
+      - name: Check AWS identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ------------------------------------------------
+      # 4. Login to ECR
+      # ------------------------------------------------
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+
+      # ------------------------------------------------
+      # 5. Build frontend Docker image
+      # ------------------------------------------------
+      - name: Build frontend Docker image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build \
+            -t $REGISTRY/$ECR_REPOSITORY:${{ github.sha }} \
+            -t $REGISTRY/$ECR_REPOSITORY:latest \
+            ./frontend
+
+
+      # ------------------------------------------------
+      # 6. Push image to ECR
+      # ------------------------------------------------
+      - name: Push frontend image to ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push \
+            $REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+
+          docker push \
+            $REGISTRY/$ECR_REPOSITORY:latest
+
+
+      # ------------------------------------------------
+      # 7. Deploy to frontend EC2
+      # ------------------------------------------------
+      - name: Deploy frontend to EC2
+        env:
+          EC2_HOST: ${{ secrets.FRONTEND_EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+          API_URL: ${{ secrets.API_URL }}
+
+        run: |
+
+          # Create SSH directory
+          mkdir -p ~/.ssh
+
+          # Save private key
+          echo "$EC2_KEY" > ~/.ssh/frontend.pem
+
+          chmod 600 ~/.ssh/frontend.pem
+
+          # Add EC2 host
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+
+          # SSH into frontend EC2
+          ssh -i ~/.ssh/frontend.pem \
+            "$EC2_USER@$EC2_HOST" \
+            "AWS_REGION='${{ secrets.AWS_REGION }}' \
+             REGISTRY='$REGISTRY' \
+             ECR_REPOSITORY='$ECR_REPOSITORY' \
+             IMAGE_TAG='${{ github.sha }}' \
+             AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
+             AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
+             API_URL='$API_URL' \
+             bash -s" << 'EOF'
+
+
+            set -e
+
+            echo "================================="
+            echo "Logging into ECR"
+            echo "================================="
+
+            aws ecr get-login-password \
+              --region "$AWS_REGION" | \
+              docker login \
+              --username AWS \
+              --password-stdin "$REGISTRY"
+
+
+            echo "================================="
+            echo "Pulling frontend image"
+            echo "================================="
+
+            docker pull \
+              "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+            echo "================================="
+            echo "Stopping old container"
+            echo "================================="
+
+            docker stop streamlit-frontend || true
+
+            docker rm streamlit-frontend || true
+
+
+            echo "================================="
+            echo "Starting new frontend container"
+            echo "================================="
+
+            docker run -d \
+              --name streamlit-frontend \
+              --restart unless-stopped \
+              -p 8501:8501 \
+              -e API_URL="$API_URL" \
+              "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+            echo "================================="
+            echo "Frontend deployment completed"
+            echo "================================="
+
+            docker ps
+
+          EOF
