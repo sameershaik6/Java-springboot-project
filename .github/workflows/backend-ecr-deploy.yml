@@ -1,42 +1,182 @@
-name: Test AWS OIDC
+name: Backend Docker ECR Deploy
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ecr-deploy.yml'
+
   workflow_dispatch:
 
-permissions:
-  id-token: write
-  contents: read
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: java-springboot-backend
+  CONTAINER_NAME: springboot-backend
 
 jobs:
 
-  test-oidc:
+  build-push-deploy:
 
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Get GitHub OIDC token
-        id: get-token
+      # ------------------------------------------------
+      # 1. Checkout code
+      # ------------------------------------------------
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+
+      # ------------------------------------------------
+      # 2. Configure AWS credentials
+      # ------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+
+      # ------------------------------------------------
+      # 3. Test AWS connection
+      # ------------------------------------------------
+      - name: Check AWS identity
         run: |
-          TOKEN=$(curl -s \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
-            | jq -r '.value')
+          aws sts get-caller-identity
 
-          echo "Token received: ${#TOKEN} characters"
 
-          echo "$TOKEN" > /tmp/token.txt
+      # ------------------------------------------------
+      # 4. Login to ECR
+      # ------------------------------------------------
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Decode OIDC token claims
+
+      # ------------------------------------------------
+      # 5. Build Docker image
+      # ------------------------------------------------
+      - name: Build backend Docker image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          TOKEN=$(cat /tmp/token.txt)
+          docker build \
+            -t $REGISTRY/$ECR_REPOSITORY:${{ github.sha }} \
+            -t $REGISTRY/$ECR_REPOSITORY:latest \
+            ./backend
 
-          PAYLOAD=$(echo "$TOKEN" | cut -d '.' -f 2)
 
-          # Add padding if required
-          PADDING=$((4 - ${#PAYLOAD} % 4))
-          if [ "$PADDING" -ne 4 ]; then
-            PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PADDING))"
-          fi
+      # ------------------------------------------------
+      # 6. Push image to ECR
+      # ------------------------------------------------
+      - name: Push backend image to ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push \
+            $REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
 
-          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq .
+          docker push \
+            $REGISTRY/$ECR_REPOSITORY:latest
+
+
+      # ------------------------------------------------
+      # 7. Deploy to backend EC2
+      # ------------------------------------------------
+      - name: Deploy backend to EC2
+        env:
+          EC2_HOST: ${{ secrets.BACKEND_EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USERNAME: ${{ secrets.MYSQL_USERNAME }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+
+        run: |
+
+          # Create SSH directory
+          mkdir -p ~/.ssh
+
+          # Save private key
+          echo "$EC2_KEY" > ~/.ssh/backend.pem
+
+          chmod 600 ~/.ssh/backend.pem
+
+          # Add EC2 host
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+
+          # SSH into EC2
+          ssh -i ~/.ssh/backend.pem \
+            "$EC2_USER@$EC2_HOST" \
+            "AWS_REGION='${{ secrets.AWS_REGION }}' \
+             REGISTRY='$REGISTRY' \
+             ECR_REPOSITORY='$ECR_REPOSITORY' \
+             IMAGE_TAG='${{ github.sha }}' \
+             AWS_ACCESS_KEY_ID='${{ secrets.AWS_ACCESS_KEY_ID }}' \
+             AWS_SECRET_ACCESS_KEY='${{ secrets.AWS_SECRET_ACCESS_KEY }}' \
+             MYSQL_HOST='$MYSQL_HOST' \
+             MYSQL_USERNAME='$MYSQL_USERNAME' \
+             MYSQL_PASSWORD='$MYSQL_PASSWORD' \
+             bash -s" << 'EOF'
+
+
+            set -e
+
+            echo "================================="
+            echo "Logging into ECR"
+            echo "================================="
+
+            aws ecr get-login-password \
+              --region "$AWS_REGION" | \
+              docker login \
+              --username AWS \
+              --password-stdin "$REGISTRY"
+
+
+            echo "================================="
+            echo "Pulling backend image"
+            echo "================================="
+
+            docker pull \
+              "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+            echo "================================="
+            echo "Stopping old container"
+            echo "================================="
+
+            docker stop springboot-backend || true
+
+            docker rm springboot-backend || true
+
+
+            echo "================================="
+            echo "Starting new backend container"
+            echo "================================="
+
+            docker run -d \
+              --name springboot-backend \
+              --restart unless-stopped \
+              -p 8084:8084 \
+              -e MYSQL_HOST="$MYSQL_HOST" \
+              -e MYSQL_PORT=3306 \
+              -e MYSQL_USERNAME="$MYSQL_USERNAME" \
+              -e MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+              "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+            echo "================================="
+            echo "Backend deployment completed"
+            echo "================================="
+
+            docker ps
+
+          EOF
